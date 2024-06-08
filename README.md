@@ -7,6 +7,7 @@ Our approach is efficient, requiring minimal overhead with fine-tuning needed on
 
 * 📄[Paper](https://arxiv.org/abs/2312.11193)
 * 📚[Dataset Download](https://huggingface.co/datasets/yuyijiong/Long-Instruction-with-Paraphrasing)
+* ✨[GitHub](https://github.com/yuyijiong/train_with_paraphrasing)
 
 ## 💻 Code
 * Use QLora method to training the model with our dataset: `train_with_paraphrasing.py`
