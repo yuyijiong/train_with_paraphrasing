@@ -7,7 +7,7 @@ import transformers
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from transformers import DataCollatorForSeq2Seq, TrainingArguments, Trainer
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, get_peft_model,prepare_model_for_kbit_training
 from datasets import Dataset, concatenate_datasets
 from tqdm import tqdm
 import warnings
@@ -100,26 +100,6 @@ def tokenize_messages_sft(examples, tokenizer, max_length, answer_start_str: str
     return {'input_ids': input_ids, 'labels': labels}
 
 
-def prepare_model(model):
-    for name, param in model.named_parameters():
-        # freeze base model's layers
-        param.requires_grad = False
-
-    # For backward compatibility
-    if hasattr(model, "enable_input_require_grads"):
-        model.enable_input_require_grads()
-    else:
-
-        def make_inputs_require_grad(module, input, output):
-            output.requires_grad_(True)
-
-        model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
-
-    # enable gradient checkpointing for memory efficiency
-    model.gradient_checkpointing_enable()
-
-    return model
-
 
 def context_qa_prompt(tokenizer, context, questions: list, answers: list):
     messages = []
@@ -194,8 +174,8 @@ def main(base_model_path, output_dir, datasedt_dir):
         optim="adamw_torch",
         weight_decay=0,
 
-        lr_scheduler_type="linear",
-        warmup_ratio=0.02,
+        lr_scheduler_type="constant_with_warmup",
+        warmup_ratio=0.05,
         learning_rate=2e-5,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=int(16 / num_gpus),
@@ -296,7 +276,7 @@ def main(base_model_path, output_dir, datasedt_dir):
         print('model.config.rope_scaling:', model.config.rope_scaling)
 
     # 给模型开启梯度检查点
-    model = prepare_model(model)
+    model = prepare_model_for_kbit_training(model,use_gradient_checkpointing=True)
     model.gradient_checkpointing = True
 
     # lora训练模型所有linear层
