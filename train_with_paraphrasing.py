@@ -99,7 +99,59 @@ def tokenize_messages_sft(examples, tokenizer, max_length, answer_start_str: str
 
     return {'input_ids': input_ids, 'labels': labels}
 
+# 微调，做padding，手动加上bos和eos，手动加上labels
+def tokenize_sft(examples, tokenizer, max_length, add_special_tokens=True,truncation=True,padding=False,train_on_output=False,**kwargs):
 
+    def set_labels2(input_ids:list,answer_start_str,answer_end_str):
+        labels = [-100] * len(input_ids)
+        answer_start_ids=tokenizer.encode(answer_start_str)
+        answer_end_ids=tokenizer.encode(answer_end_str)
+
+        start_index_list = [i for i in range(len(input_ids) - 1) if
+                        input_ids[i:i+len(answer_start_ids)] == answer_start_ids]
+        #从index_list中的每个start_index往后搜索，如果遇到 answer_end_ids，就把这部分的labels设为input_ids，答案不包含answer_start_str，但包含answer_end_str
+        for start_index in start_index_list:
+            # 从start_index往后搜索
+            for end_index in range(start_index + len(answer_start_ids), len(input_ids)):
+                #如果找到了answer_end_ids，则把input_ids[start_index+len(answer_start_ids):end_index+len(answer_end_ids)]的labels设为input_ids[start_index+len(answer_start_ids):end_index+len(answer_end_ids)]
+                if input_ids[end_index:end_index+len(answer_end_ids)]==answer_end_ids:
+                    labels[start_index + len(answer_start_ids):end_index + len(answer_end_ids)] = input_ids[start_index + len(answer_start_ids):end_index + len(answer_end_ids)]
+                    break
+
+
+        #如果labels不为-100数量不大于len(answer_end_ids)或全是-100，则报错
+        if len([label for label in labels if label!=-100])<=len(answer_end_ids):
+            import warnings
+            warnings.warn('labels全是-100')
+            return None
+
+        return labels
+
+
+    # 检查examples['text']的每个item是否以bos和eos开头结尾，如果没有则加上
+    if add_special_tokens:
+        text_items = [tokenizer.bos_token + item if not item.startswith(tokenizer.bos_token) else item for item in
+                      examples['text']]
+        text_items = [item + tokenizer.eos_token if not item.endswith(tokenizer.eos_token) else item for item in
+                      text_items]
+    else:
+        text_items = examples['text']
+
+    # 此处返回列表，而不用返回tensor。而且通常不padding
+    output = tokenizer(text_items, truncation=truncation, add_special_tokens=False,
+                           max_length=max_length, padding=padding, return_tensors=None, return_attention_mask=True)
+
+    if train_on_output:
+        # 判断output['input_ids']是一重列表还是二重列表
+        if isinstance(output['input_ids'][0], list):
+            output['labels'] = [set_labels2(input_ids,**kwargs) for input_ids in output['input_ids']]
+        else:
+            output['labels'] = set_labels2(output['input_ids'],**kwargs)
+
+    else:
+        output['labels'] = output['input_ids'].copy()
+
+    return output
 
 def context_qa_prompt(tokenizer, context, questions: list, answers: list):
     messages = []
@@ -207,18 +259,19 @@ def main(base_model_path, output_dir, datasedt_dir):
     data_dir = datasedt_dir
     raw_dataset = load_json_datasets(data_dir, tokenizer)
 
-    with training_args.main_process_first(desc="grouping texts together"):
-        # 将数据的每个sample的text转化为input_ids，只有答案部分作为labels
+    with training_args.main_process_first(desc="tokenizing"):
+        # 将数据的每个sample的text转化为token，不进行padding，不需要加上bos和eos，因为数据中已经有了
         lm_dataset = raw_dataset.map(
-            lambda x: tokenize_messages_sft(x,
-                                            tokenizer=tokenizer,
-                                            max_length=model_max_length,
-                                            answer_start_str='<|im_start|>assistant\n',
-                                            answer_end_str='<|im_end|>'
-
-                                            ),
+            lambda x: tokenize_sft(x, tokenizer=tokenizer,
+                                                 max_length=model_max_length,
+                                                 add_special_tokens=False,
+                                                 truncation=True,
+                                                 padding=False,
+                                                 train_on_output=True,
+                                                 answer_start_str='<|im_start|>assistant\n',
+                                                 answer_end_str='<|im_end|>',),
             remove_columns=raw_dataset.column_names,
-            batched=False,
+            batched=True,
             num_proc=16,
             desc="Running tokenizer on dataset", )
 
@@ -234,11 +287,10 @@ def main(base_model_path, output_dir, datasedt_dir):
     df['length'] = df['input_ids'].apply(lambda x: len(x))
     print('样本平均长度（token数）：', df['length'].mean())
     print('样本最大长度（token数）：', df['length'].max())
-    # #打印第一条样本labels中为-100的个数和labels的长度
-    # print('第1条样本labels中不为-100的个数：',sum(df['labels'][0] != -100))
-    # print('第1条样本的长度：',len(df['labels'][0]))
-    # print('第10条样本labels中不为-100的个数：',sum(df['labels'][10]!= -100))
-    # print('第10条样本的长度：',len(df['labels'][10]))
+    #统计labels中不为-100的个数的平均值
+    df['labels_num'] = df['labels'].apply(lambda x: len([label for label in x if label != -100]))
+    print('labels中不为-100的个数的平均值：', df['labels_num'].mean())
+    print('labels中不为-100的个数的最大值：', df['labels_num'].max())
     del df
 
     # 准备模型
